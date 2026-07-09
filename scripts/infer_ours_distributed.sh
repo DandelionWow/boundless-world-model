@@ -10,7 +10,7 @@ cd "${REPO_ROOT}"
 # Environment Configuration
 # ===========================================
 
-CUDA_VISIBLE_DEVICES='2,3'
+CUDA_VISIBLE_DEVICES='0,1,2,3'
 
 # ===========================================
 # Path Configuration
@@ -19,9 +19,9 @@ CUDA_VISIBLE_DEVICES='2,3'
 CONFIG_PATH='configs/infer/infer.yaml'
 MODEL_PATHS='/data/wangbowen/models/Wan-AI/Wan2.2-TI2V-5B/'
 CKPT_PATH='/data/wangbowen/models/BLM/step-12000.safetensors'
-DATASET_BASE_PATH='data/RoboTwin2.0_boundless'
-DATASET_METADATA_PATH='data/RoboTwin2.0_boundless/RoboTwin2.0_boundless.jsonl'
-ACTION_STAT_PATH='data/RoboTwin2.0_boundless/stat.json'
+DATASET_BASE_PATH='data/ep2_1_object_pose_auto_dual_bwm'
+DATASET_METADATA_PATH='data/ep2_1_object_pose_auto_dual_bwm/ep2_1_object_pose_auto_dual_bwm.jsonl'
+ACTION_STAT_PATH='data/ep2_1_object_pose_auto_dual_bwm/stat.json'
 OUTPUT_PATH='outputs/inference'
 
 # ===========================================
