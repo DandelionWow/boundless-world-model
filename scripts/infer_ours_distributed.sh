@@ -28,7 +28,7 @@ OUTPUT_PATH='outputs/inference'
 # Inference Configuration
 # ===========================================
 
-START_INDEX='50'
+START_INDEX='0'
 MAX_SAMPLES='0'
 OVERWRITE=''
 # OVERWRITE='--overwrite'
