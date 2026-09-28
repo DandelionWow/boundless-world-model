@@ -9,7 +9,7 @@ dataset:
   dataset_metadata_path: null
   dataset_repeat: 10
   dataset_num_workers: 8
-  data_file_keys: "video"
+  data_file_keys: "video,action"
 
 # ============================================================================
 # Video Configuration

@@ -1,7 +1,6 @@
 import torch, os, argparse, accelerate, warnings, json
-from diffsynth.core import UnifiedDataset
+from wan_video_action.data import RoboTwinUnifiedDataset
 from wan_video_action.data.operators import LoadCobotAction, ResolvePromptEmbPath, create_video_operator
-from wan_video_action.data.data_utils import pack_paths
 from diffsynth.core import ModelConfig
 from wan_video_action.pipelines.wan_video_action import build_wan_video_action_pipeline
 from diffsynth.diffusion import *
@@ -165,7 +164,7 @@ if __name__ == "__main__":
         stats = json.load(f)
     stat = {args.action_type: stats[args.action_type]} if args.action_type in stats else stats
 
-    dataset = UnifiedDataset(
+    dataset = RoboTwinUnifiedDataset(
         base_path=args.dataset_base_path,
         metadata_path=args.dataset_metadata_path,
         repeat=args.dataset_repeat,
@@ -183,12 +182,6 @@ if __name__ == "__main__":
             resize_mode=args.resize_mode,
         ),
         special_operator_map=special_operator_map,
-    )
-
-    pack_paths(
-        dataset.data,
-        ("video", "start_frame", "end_frame"),
-        ("action", "start_frame", "end_frame"),
     )
 
     if "action" in runtime_config["data_file_keys"]:
