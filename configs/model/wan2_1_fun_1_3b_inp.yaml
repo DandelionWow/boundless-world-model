@@ -9,5 +9,5 @@ modules:
   image: "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"
 
 # Relative subdirectory for the tokenizers
-tokenizer_subdir: "google"
+tokenizer_subdir: "google/umt5-xxl"
 clip_tokenizer_subdir: "xlm-roberta-large"

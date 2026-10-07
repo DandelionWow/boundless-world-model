@@ -6,17 +6,19 @@
 # Dataset Configuration
 # ============================================================================
 dataset:
+  dataset_name: "robotwin"
   dataset_base_path: ""
   dataset_metadata_path: null
+  data_keys: ["video", "action"]
 
 # ============================================================================
 # Video Configuration
 # ============================================================================
 video:
-  height: 672
-  width: 896
+  height: 480
+  width: 640
   max_pixels: 16777216
-  num_frames: 57
+  num_frames: 81
   resize_mode: "crop"
   num_history_frames: 9
   time_division_factor: 4
@@ -29,8 +31,13 @@ video:
 model:
   model_paths: ""
   model_config_path: "configs/model/wan2_2_ti2v_5b.yaml"
-  text_mode: "none"
-  action_mode: "adaln"
+  weights: ["dit", "vae"]
+  modes:
+    dit: "default"
+    text: "none"
+    vae: "raw"
+    image: "none"
+    action: "adaln"
 
 # ============================================================================
 # Action Configuration
@@ -45,6 +52,7 @@ action:
 # Training Configuration
 # ============================================================================
 training:
+  trainable: []
   seed: 42
   mixed_precision: "bf16"
 

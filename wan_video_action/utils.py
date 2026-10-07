@@ -15,6 +15,8 @@ def resolve_path(base_path: str, path: str) -> str:
 
 
 def resolve_model_path(model_path: str):
+    if isinstance(model_path, (list, tuple)):
+        return list(model_path)
     model_path = os.path.expanduser(str(model_path).strip())
     if not model_path.endswith(".safetensors.index.json"):
         return model_path
@@ -25,6 +27,13 @@ def resolve_model_path(model_path: str):
         os.path.join(os.path.dirname(model_path), shard_name)
         for shard_name in sorted(set(weight_map.values()))
     ]
+
+
+def load_action_stats(action_stat_path: str) -> dict:
+    if not action_stat_path:
+        raise ValueError("`action_stat_path` is required when loading action data.")
+    with open(action_stat_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _normalize_to_uint8(array: np.ndarray) -> np.ndarray:
@@ -107,10 +116,18 @@ def resolve_num_frames(
     return num_frames
 
 
-def set_global_seed(seed=42):
+def set_global_seed(seed=42, deterministic=False):
     os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.use_deterministic_algorithms(True)

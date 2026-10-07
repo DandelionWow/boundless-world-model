@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -13,9 +12,9 @@ import numpy as np
 import torch
 
 from diffsynth.core import ModelConfig
-from wan_video_action.data import LoadCobotAction, RoboTwinUnifiedDataset, create_video_operator
-from wan_video_action.parsers import add_general_config, merge_yaml_and_args, prepare_runtime_config
-from wan_video_action.pipelines.wan_video_action import build_wan_video_action_pipeline
+from wan_video_action.data import build_infer_dataset
+from wan_video_action.parsers import add_general_config, merge_yaml_and_args, prepare_model_config, resolve_data_keys
+from wan_video_action.pipelines.wan_video_action import WanVideoActionPipeline
 from wan_video_action.utils import align_num_frames, resolve_model_path, save_video
 
 
@@ -118,7 +117,6 @@ def _run_autoregressive(
             num_history_frames=int(args.num_history_frames),
             cfg_scale=float(args.cfg_scale),
             num_inference_steps=int(args.num_inference_steps),
-            use_history_condition_noise_in_inference=True,
             progress_bar_cmd=lambda iterable, *args, **kwargs: iterable,
             output_type="floatpoint",
         )
@@ -143,11 +141,10 @@ def _run_autoregressive(
     return output_path
 
 
-def build_pipeline(args):
-    runtime_config = prepare_runtime_config(args)
+def build_pipeline(args, model_config):
     model_configs = [
         ModelConfig(path=resolve_model_path(model_path))
-        for model_path in runtime_config["model_paths_list"]
+        for model_path in model_config["model_paths_list"]
     ]
 
     print("[resolved_models] model_configs:", [config.path for config in model_configs])
@@ -155,55 +152,19 @@ def build_pipeline(args):
     dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float16
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    pipe = build_wan_video_action_pipeline(
+    pipe = WanVideoActionPipeline.from_pretrained(
         torch_dtype=dtype,
         device=device,
         model_configs=model_configs,
         tokenizer_config=None,
         ckpt_path=args.ckpt_path,
         action_dim=args.action_dim,
-        action_mode=args.action_mode,
+        action_mode=args.modes["action"],
     )
     pipe.use_gradient_checkpointing = False
     pipe.use_gradient_checkpointing_offload = False
     pipe.eval()
     return pipe
-
-
-def build_infer_dataset(args):
-    with open(args.action_stat_path, "r") as f:
-        stat = json.load(f)
-    action_stat = stat
-
-    return RoboTwinUnifiedDataset(
-        base_path=args.dataset_base_path,
-        metadata_path=args.dataset_metadata_path,
-        repeat=1,
-        data_file_keys=("video", "action"),
-        main_data_operator=create_video_operator(
-            base_path=args.dataset_base_path,
-            max_pixels=args.max_pixels,
-            height=args.height,
-            width=args.width,
-            height_division_factor=args.spatial_division_factor,
-            width_division_factor=args.spatial_division_factor,
-            num_frames=1,
-            time_division_factor=args.time_division_factor,
-            time_division_remainder=args.time_division_remainder,
-            resize_mode=args.resize_mode,
-        ),
-        special_operator_map={
-            "action": LoadCobotAction(
-                base_path=args.dataset_base_path,
-                action_type=args.action_type,
-                stat=action_stat,
-                num_frames=None,
-                align_num_frames=False,
-                time_division_factor=args.time_division_factor,
-                time_division_remainder=args.time_division_remainder,
-            )
-        },
-    )
 
 
 def prepare_sample_for_rollout(sample: Dict, sample_index: int, pipe, args) -> Dict:
@@ -235,8 +196,14 @@ def prepare_sample_for_rollout(sample: Dict, sample_index: int, pipe, args) -> D
 
 def main():
     args = parse_args()
+    model_config = prepare_model_config(args)
+    args = resolve_data_keys(args, stage="infer")
     print("[resolved_config] model_paths:", args.model_paths)
     print("[resolved_config] model_config_path:", args.model_config_path)
+    print("[resolved_config] resolved_model_paths:", model_config["model_paths_list"])
+    print("[resolved_config] model.weights:", args.weights)
+    print("[resolved_config] dataset.data_keys:", args.data_keys)
+    print("[resolved_config] model.modes:", args.modes)
     print("[resolved_config] dataset_base_path:", args.dataset_base_path)
     print("[resolved_config] dataset_metadata_path:", args.dataset_metadata_path)
     print("[resolved_config] action_stat_path:", args.action_stat_path)
@@ -257,7 +224,7 @@ def main():
     os.makedirs(args.output_path, exist_ok=True)
     dataset = build_infer_dataset(args)
 
-    pipe = build_pipeline(args)
+    pipe = build_pipeline(args, model_config)
 
     processed = 0
     for sample_index in range(args.start_index, len(dataset)):

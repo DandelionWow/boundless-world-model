@@ -15,7 +15,7 @@ dataset:
   dataset_num_workers: 0
 
   # [OPTIONAL] Data file keys in the metadata. Comma-separated.
-  data_file_keys: "video,action"
+  data_file_keys: "image,video"
 
 # ============================================================================
 # Video Configuration

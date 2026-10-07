@@ -1,77 +1,95 @@
 import argparse
+import json
 import os
+import sys
 from omegaconf import OmegaConf
 
 
-def merge_yaml_and_args(yaml_path, parser, args):
+def merge_yaml_and_args(yaml_path, parser, args, cli_args=None):
     # priority: CLI args > YAML config > parser defaults
     if not yaml_path or not os.path.exists(yaml_path):
         return args
 
+    if cli_args is None:
+        cli_args = sys.argv[1:]
+    explicit_cli_keys = {
+        action.dest
+        for action in parser._actions
+        for option in action.option_strings
+        if option in cli_args
+    }
     yaml_dict = OmegaConf.to_container(OmegaConf.load(yaml_path), resolve=True) or {}
 
-    cli_overrides = {}
-    for key, value in vars(args).items():
-        if value != parser.get_default(key):
-            cli_overrides[key] = value
-            
     for section in yaml_dict.values():
         if isinstance(section, dict):
             for key, value in section.items():
-                if key not in cli_overrides and hasattr(args, key):
+                if hasattr(args, key) and key not in explicit_cli_keys:
                     setattr(args, key, value)
-
     return args
 
 
-def prepare_runtime_config(args):
-    model_config_path = getattr(args, "model_config_path", "")
+def _expand_safetensors_index(path: str):
+    if not str(path).endswith(".safetensors.index.json") or not os.path.isfile(path):
+        return path
+    with open(path, "r", encoding="utf-8") as f:
+        weight_map = json.load(f)["weight_map"]
+    shard_names = sorted(set(weight_map.values()))
+    return [os.path.join(os.path.dirname(path), shard_name) for shard_name in shard_names]
+
+
+def _resolve_model_paths(model_root: str, model_config_path: str, weight_modules):
     cfg = OmegaConf.to_container(OmegaConf.load(model_config_path), resolve=True)
-    
-    enabled_mods = [m for m in ["dit", "vae", "image"] if getattr(args, f"enable_{m}", True)]
-    
-    text_mode = getattr(args, "text_mode", "emb")
-    text_enabled = getattr(args, "enable_text", True) and text_mode != "none"
-    if text_enabled:
-        enabled_mods.append("text" if text_mode == "t5" else f"text:{text_mode}")
-    
-    action_mode = getattr(args, "action_mode", "none")
-    if action_mode != "none":
-        enabled_mods.append(f"action:{action_mode}")
+    module_files = cfg["modules"]
+    paths = []
+    for module in weight_modules:
+        rel_path = module_files[module]
+        path = rel_path if os.path.isabs(rel_path) else os.path.join(model_root, rel_path)
+        paths.append(_expand_safetensors_index(path))
+    return paths
 
-    model_paths = getattr(args, "model_paths", "")
-    yaml_modules_map = cfg.get("modules", {})
-    
-    paths_list = [
-        os.path.join(model_paths, yaml_modules_map[m.split(":")[0]])
-        for m in enabled_mods if m.split(":")[0] in yaml_modules_map
-    ]
 
-    tokenizer_path = None
-    if text_enabled and text_mode == "t5" and model_paths:
-        subdir = getattr(args, "tokenizer_subdir", cfg.get("tokenizer_subdir", "tokenizer"))
-        tokenizer_path = os.path.join(model_paths, subdir)
+def prepare_model_config(args):
+    # cli args override yaml config, if provided
+    for mode_name in args.modes.keys():
+        value = getattr(args, f"{mode_name}_mode")
+        if value is not None:
+            args.modes[mode_name] = value
 
-    raw_keys = getattr(args, "data_file_keys", "image,video")
-    data_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+    model_paths_list = _resolve_model_paths(args.model_paths, args.model_config_path, args.weights)
+
+    cfg = OmegaConf.to_container(OmegaConf.load(args.model_config_path), resolve=True)
+    tokenizer_path = os.path.join(args.model_paths, cfg["tokenizer_subdir"])
 
     return {
-        "modules": enabled_mods,
-        "model_paths_list": paths_list,
+        "model_paths_list": model_paths_list,
         "tokenizer_path": tokenizer_path,
-        "data_file_keys": data_keys,
-        "text_enabled": text_enabled,
-        "action_enabled": action_mode != "none"
     }
+
+
+def resolve_data_keys(args, stage="train"):
+    if stage == "infer" or args.modes["vae"] == "raw":
+        keys = ["video"]
+    else:
+        keys = ["latents"]
+
+    if args.modes["action"] != "none":
+        keys.append("action")
+
+    if args.modes["text"] == "emb":
+        keys.extend(["prompt_emb", "negative_prompt_emb"])
+
+    args.data_keys = keys
+    return args
 
 
 def add_dataset_base_config(parser: argparse.ArgumentParser):
     group = parser.add_argument_group("dataset")
+    group.add_argument("--dataset_name", type=str, default="robotwin", help="[KEY] Dataset builder name.")
     group.add_argument("--dataset_base_path", type=str, default="", help="[REQUIRED] Base path of the dataset.")
     group.add_argument("--dataset_metadata_path", type=str, default=None, help="[OPTIONAL] Path to the metadata file of the dataset.")
     group.add_argument("--dataset_repeat", type=int, default=1, help="[TUNABLE] Number of times to repeat the dataset per epoch.")
     group.add_argument("--dataset_num_workers", type=int, default=0, help="[OPTIONAL] Number of workers for data loading.")
-    group.add_argument("--data_file_keys", type=str, default="image,video", help="[OPTIONAL] Data file keys in the metadata. Comma-separated.")
+    parser.set_defaults(data_keys=None)
     return parser
 
 
@@ -87,6 +105,7 @@ def add_video_size_config(parser: argparse.ArgumentParser):
     group.add_argument("--time_division_remainder", type=int, default=1, help="[OPTIONAL] Temporal frame remainder used with time_division_factor.")
     group.add_argument("--spatial_division_factor", type=int, default=32, help="[OPTIONAL] Spatial size divisor used to align frame height and width.")
     group.add_argument("--chunk_mode", type=str, default="static", choices=["static", "dynamic"], help="[OPTIONAL] Sampling mode for video chunks, static uses dataset bounds and dynamic uses random crop.")
+    group.add_argument("--history_template_sampling", type=int, choices=[0, 1], default=0, help="[OPTIONAL] Enable history-template sampling: frame0 + recent history + future frames.")
     return parser
 
 
@@ -99,18 +118,18 @@ def add_model_config(parser: argparse.ArgumentParser):
     group.add_argument("--offload_models", type=str, default=None, help="[OPTIONAL] Models with offload, comma-separated. Only used in splited training.")
     group.add_argument("--model_config_path", type=str, default="configs/model/wan2_1_fun_1_3b_inp.yaml", help="[KEY] Path to model config YAML.")
     group.add_argument("--initialize_model_on_cpu", action="store_true", default=False, help="[OPTIONAL] Whether to initialize models on CPU.")
-    group.add_argument("--text_mode", type=str, default="emb", choices=["t5", "emb", "none"], help="[KEY] Execution mode for the text module: 't5' (full inference), 'emb' (use pre-extracted embeddings), 'none' (disabled).")
-    group.add_argument("--enable_text", action="store_true", default=True, help="[OPTIONAL] Enable text encoder.")
-    group.add_argument("--enable_dit", action="store_true", default=True, help="[OPTIONAL] Enable DiT diffusion model.")
-    group.add_argument("--enable_vae", action="store_true", default=True, help="[OPTIONAL] Enable VAE model.")
-    group.add_argument("--enable_image", action="store_true", default=True, help="[OPTIONAL] Enable image encoder (CLIP).")
-    group.add_argument("--action_mode", type=str, default="noise", choices=["noise", "adaln", "none"], help="[KEY] Action injection mode: noise (per-frame), adaln (global), none (disabled).")
+    group.add_argument("--dit_mode", type=str, default=None, choices=["default", "none"], help="[OPTIONAL] Override model.modes.dit.")
+    group.add_argument("--text_mode", type=str, default=None, choices=["t5", "emb", "none"], help="[OPTIONAL] Override model.modes.text.")
+    group.add_argument("--vae_mode", type=str, default=None, choices=["raw", "emb", "none"], help="[OPTIONAL] Override model.modes.vae.")
+    group.add_argument("--image_mode", type=str, default=None, choices=["none", "default", "flat"], help="[OPTIONAL] Override model.modes.image.")
+    group.add_argument("--action_mode", type=str, default=None, choices=["noise", "adaln", "none"], help="[OPTIONAL] Override model.modes.action.")
+    parser.set_defaults(weights=None, modes=None)
     return parser
 
 
 def add_action_config(parser: argparse.ArgumentParser):
     group = parser.add_argument_group("action")
-    group.add_argument("--action_type", type=str, choices=["joint_abs", "eef_abs", "joint_delta", "eef_delta"], default="eef_delta", help='[KEY] Action/state representation: joint/eef × abs/delta. (choices: "joint_abs", "eef_abs", "joint_delta", "eef_delta")')
+    group.add_argument("--action_type", type=str, choices=["joint_abs", "eef_abs", "joint_delta", "eef_delta", "state_joint", "state_pose", "action_joint", "action_pose"], default="eef_delta", help='[KEY] Action/state representation: joint/eef x abs/delta, with state_* and action_* aliases.')
     group.add_argument("--action_stat_path", type=str, default=None, help="[OPTIONAL] Path to robot normalization stats (stat.json).")
     group.add_argument("--action_dim", type=int, default=14, help="[OPTIONAL] Action dimension.")
     return parser
@@ -119,16 +138,17 @@ def add_action_config(parser: argparse.ArgumentParser):
 def add_training_config(parser: argparse.ArgumentParser):
     group = parser.add_argument_group("training")
     group.add_argument("--learning_rate", type=float, default=1e-4, help="[TUNABLE] Learning rate.")
-    group.add_argument("--num_epochs", type=int, default=1, help="[TUNABLE] Number of epochs.")
-    group.add_argument("--trainable_models", type=str, default=None, help="[KEY] Models to train, e.g., dit, vae, text_encoder.")
     group.add_argument("--find_unused_parameters", action="store_true", default=False, help="[OPTIONAL] Whether to find unused parameters in DDP.")
     group.add_argument("--weight_decay", type=float, default=0.01, help="[TUNABLE] Weight decay.")
     group.add_argument("--task", type=str, default="sft", help="[OPTIONAL] Task type.")
     group.add_argument("--seed", type=int, default=42, help="[OPTIONAL] Random seed for python/numpy/torch.")
+    group.add_argument("--deterministic", action="store_true", default=False, help="[OPTIONAL] Enable deterministic PyTorch algorithms for strict resume debugging.")
     group.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"], help="[OPTIONAL] Mixed precision mode.")
     group.add_argument("--max_timestep_boundary", type=float, default=1.0, help="[OPTIONAL] Max timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
     group.add_argument("--min_timestep_boundary", type=float, default=0.0, help="[OPTIONAL] Min timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
+    group.add_argument("--max_train_steps", type=int, default=None, help="[KEY] Maximum optimizer steps.")
     group.add_argument("--batch_size", type=int, default=1, help="[TUNABLE] Batch size per GPU.")
+    parser.set_defaults(trainable=None)
     return parser
 
 
@@ -136,9 +156,8 @@ def add_output_config(parser: argparse.ArgumentParser):
     group = parser.add_argument_group("output")
     group.add_argument("--output_path", type=str, default="./models", help="[KEY] Output save path.")
     group.add_argument("--remove_prefix_in_ckpt", type=str, default="pipe.dit.", help='[OPTIONAL] Remove prefix in ckpt. (default: "pipe.dit.")')
-    group.add_argument("--save_steps", type=int, default=None, help="[OPTIONAL] Number of checkpoint saving intervals. If None, checkpoints will be saved every epoch.")
-    group.add_argument("--ckpt_path", type=str, default=None, help="[OPTIONAL] Path to model checkpoint (.safetensors) used to initialize training weights (model-only resume).")
-    group.add_argument("--resume_from", type=str, default=None, help="[OPTIONAL] Path to a checkpoint directory saved by accelerator (e.g., output_path/epoch-0).")
+    group.add_argument("--save_steps", type=int, default=None, help="[KEY] Optimizer-step interval for checkpoint saving.")
+    group.add_argument("--resume_from", type=str, default=None, help="[OPTIONAL] Path to a full training state directory saved by accelerator (e.g., output_path/states/latest).")
     return parser
 
 
@@ -166,12 +185,13 @@ def add_tracking_config(parser: argparse.ArgumentParser):
     group = parser.add_argument_group("tracking")
     group.add_argument("--use_wandb", action="store_true", default=False, help="[OPTIONAL] Enable Weights & Biases tracking.")
     group.add_argument("--use_swanlab", action="store_true", default=False, help="[OPTIONAL] Enable SwanLab tracking.")
-    group.add_argument("--swanlab_experiment_name", type=str, default=None, help="[OPTIONAL] SwanLab experiment name. Defaults to output_path.")
+    group.add_argument("--run_name", type=str, default=None, help="[OPTIONAL] Remote tracker run/project name. Defaults to output_path.")
     return parser
 
 
 def add_infer_config(parser: argparse.ArgumentParser):
     group = parser.add_argument_group("infer")
+    group.add_argument("--ckpt_path", type=str, default=None, help="[OPTIONAL] Path to model checkpoint (.safetensors) used for inference.")
     group.add_argument("--cfg_scale", type=float, default=5.0, help="[OPTIONAL] CFG scale for generation.")
     group.add_argument("--num_inference_steps", type=int, default=50, help="[OPTIONAL] Number of inference steps.")
     group.add_argument("--negative_prompt", type=str, default="The video is not of a high quality, it has a low resolution. Watermark present in each frame. The background is solid. Strange body and strange trajectory. Distortion", help="[OPTIONAL] Negative prompt for generation.")

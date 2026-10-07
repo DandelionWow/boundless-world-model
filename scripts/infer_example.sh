@@ -13,8 +13,10 @@ fi
 cd "${REPO_ROOT}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export TOKENIZERS_PARALLELISM="false"
 
-CONFIG_PATH="${CONFIG_PATH:-configs/infer/robotwin_ti2v_720p.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-configs/infer/infer.yaml}"
 MODEL_PATHS="${MODEL_PATHS:-models/Wan2.2-TI2V-5B}"
 CKPT_PATH="${CKPT_PATH:-checkpoints/action_model.safetensors}"
 DATASET_BASE_PATH="${DATASET_BASE_PATH:-data/RoboTwin2.0_lerobot}"

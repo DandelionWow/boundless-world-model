@@ -35,6 +35,7 @@ wandb/
 .venv/
 venv/
 scripts/local.sh
+scripts/train_local.sh
 
 # OS
 .DS_Store
