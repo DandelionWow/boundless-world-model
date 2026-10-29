@@ -19,6 +19,7 @@ logs/
 wandb/
 
 # Data
+models/
 *.mp4
 *.png
 *.jpg
@@ -47,5 +48,3 @@ AGENTS.md
 
 # Demo
 !demo/**
-
-models/

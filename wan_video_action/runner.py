@@ -150,7 +150,8 @@ def launch_training_task(
                         break
         skip_batches = 0
         epoch_id += 1
-    model_logger.on_training_end(accelerator, model, args.save_steps)
+    if args.save_at_train_end:
+        model_logger.on_training_end(accelerator, model, args.save_steps)
     training_logger.close()
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

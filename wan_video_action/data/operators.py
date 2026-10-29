@@ -512,6 +512,36 @@ EEF_NAMES = [
 ]
 
 
+def eef_abs_to_pose14(eef_abs: np.ndarray) -> np.ndarray:
+    """Convert RoboTwin's two 3D+quaternion+gripper poses to 14D Euler poses.
+
+    RoboTwin stores each arm as ``xyz + quaternion(wxyz) + gripper``.  The
+    model consumes ``xyz + Euler(xyz) + gripper`` for each arm.
+    """
+    values = np.asarray(eef_abs, dtype=np.float32)
+    if values.ndim != 2 or values.shape[1] != 16:
+        raise ValueError(f"Expected eef_abs with shape (T, 16), got {values.shape}")
+
+    def quaternion_wxyz_to_euler_xyz(quaternion):
+        quaternion = np.asarray(quaternion, dtype=np.float64)
+        norm = np.linalg.norm(quaternion, axis=-1, keepdims=True)
+        quaternion = quaternion / np.maximum(norm, np.finfo(np.float64).eps)
+        w, x, y, z = np.moveaxis(quaternion, -1, 0)
+        roll = np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+        pitch = np.arcsin(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
+        yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        return np.stack((roll, pitch, yaw), axis=-1).astype(np.float32)
+
+    converted = np.empty((values.shape[0], 14), dtype=np.float32)
+    converted[:, 0:3] = values[:, 0:3]
+    converted[:, 3:6] = quaternion_wxyz_to_euler_xyz(values[:, 3:7])
+    converted[:, 6] = values[:, 7]
+    converted[:, 7:10] = values[:, 8:11]
+    converted[:, 10:13] = quaternion_wxyz_to_euler_xyz(values[:, 11:15])
+    converted[:, 13] = values[:, 15]
+    return converted
+
+
 class LoadCobotAction(DataProcessingOperator):
     def __init__(
         self,
@@ -536,6 +566,7 @@ class LoadCobotAction(DataProcessingOperator):
         """
         # TODO: Compatibility aliases for older script conventions.
         requested_action_type = action_type
+        self.requested_action_type = requested_action_type
         action_type_alias = {
             "joint_abs": "state_joint",
             "eef_abs": "state_pose",
@@ -662,7 +693,18 @@ class LoadCobotAction(DataProcessingOperator):
         parquet_path, start_frame, end_frame, frame_indices = self._resolve_parquet_info(
             data, start_frame, end_frame, frame_indices=frame_indices
         )
-        column = "observation.state" if self.use_state else "action"
+        schema_names = set(pq.ParquetFile(parquet_path).schema_arrow.names)
+        raw_column = self.requested_action_type if self.requested_action_type in ("eef_abs", "joint_abs") else None
+        legacy_column = "observation.state" if self.use_state else "action"
+        if raw_column is not None and raw_column in schema_names:
+            column = raw_column
+        elif legacy_column in schema_names:
+            column = legacy_column
+        else:
+            raise KeyError(
+                f"Neither raw column {raw_column!r} nor legacy column {legacy_column!r} "
+                f"exists in {parquet_path}; available columns: {sorted(schema_names)}"
+            )
         if frame_indices is None:
             num_frames = self.get_num_frames(end_frame - start_frame + 1)
             arr = self._read_slice(parquet_path, column, start_frame, num_frames)
@@ -670,7 +712,9 @@ class LoadCobotAction(DataProcessingOperator):
             arr = self._read_indices(parquet_path, column, frame_indices)
         if arr.ndim != 2:
             raise ValueError(f"Unexpected action shape {arr.shape} in {parquet_path}")
-        if arr.shape[1] == len(JOINT_AND_EEF_NAMES):
+        if column == "eef_abs" and arr.shape[1] == 16:
+            arr = eef_abs_to_pose14(arr)
+        elif arr.shape[1] == len(JOINT_AND_EEF_NAMES):
             arr = arr[:, self.indices]
         elif self.use_joint and arr.shape[1] == len(JOINT_NAMES):
             pass

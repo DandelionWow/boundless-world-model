@@ -211,6 +211,11 @@ if __name__ == "__main__":
     print("[resolved_config] max_train_steps:", args.max_train_steps)
     print("[resolved_config] deterministic:", args.deterministic)
     loggers = [name for name in ("wandb", "swanlab") if getattr(args, f"use_{name}", False)]
+    # Accelerate's DeepSpeed launcher may export the literal value "auto" from
+    # its YAML config.  Accelerator() parses that environment variable before
+    # reconciling the plugin and fails on int("auto").  The merged train args
+    # are the source of truth and also allow CLI smoke-test overrides.
+    os.environ["ACCELERATE_GRADIENT_ACCUMULATION_STEPS"] = str(args.gradient_accumulation_steps)
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,

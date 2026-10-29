@@ -11,6 +11,7 @@ from .operators import (
     JOINT_AND_EEF_NAMES,
     JOINT_NAMES,
     EEF_NAMES,
+    eef_abs_to_pose14,
 )
 from .wan_dataset import (
     build_infer_dataset,
@@ -30,6 +31,7 @@ __all__ = [
     "JOINT_AND_EEF_NAMES",
     "JOINT_NAMES",
     "EEF_NAMES",
+    "eef_abs_to_pose14",
     "build_infer_dataset",
     "build_train_dataset",
 ]

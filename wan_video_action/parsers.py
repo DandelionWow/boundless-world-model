@@ -158,6 +158,7 @@ def add_output_config(parser: argparse.ArgumentParser):
     group.add_argument("--remove_prefix_in_ckpt", type=str, default="pipe.dit.", help='[OPTIONAL] Remove prefix in ckpt. (default: "pipe.dit.")')
     group.add_argument("--save_steps", type=int, default=None, help="[KEY] Optimizer-step interval for checkpoint saving.")
     group.add_argument("--resume_from", type=str, default=None, help="[OPTIONAL] Path to a full training state directory saved by accelerator (e.g., output_path/states/latest).")
+    group.add_argument("--no_save_at_train_end", dest="save_at_train_end", action="store_false", default=True, help="[OPTIONAL] Skip the final checkpoint, useful for smoke tests.")
     return parser
 
 
