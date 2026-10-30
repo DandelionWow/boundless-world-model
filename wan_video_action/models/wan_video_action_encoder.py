@@ -28,6 +28,9 @@ class WanVideoActionEncoder(nn.Module):
         )
 
     def forward(self, action):
+        return self.action_embedding(action)
+
+    def encode_ti2v2(self, action):
         action_context_emb = self.action_mlp1(action)
         grouped_action = torch.cat([action[:, 0:1].repeat(1, 3, 1), action], dim=1)
         grouped_action = grouped_action.reshape(action.shape[0], (action.shape[1] + 3) // 4, action.shape[2] * 4)

@@ -1,7 +1,9 @@
+import os
+
 import torch
 from tqdm import tqdm
 from typing import Optional, Union
-from einops import rearrange
+from einops import rearrange, repeat
 
 from diffsynth.pipelines.wan_video import WanVideoPipeline, WanVideoUnit_ShapeChecker
 from diffsynth.diffusion.base_pipeline import PipelineUnit
@@ -101,6 +103,7 @@ class WanVideoActionPipeline(WanVideoPipeline):
             "num_frames": num_frames,
             "num_history_frames": num_history_frames,
             "action": action,
+            "action_injection_mode": self.action_injection_mode,
             "cfg_scale": cfg_scale,
             "tiled": tiled,
             "tile_size": tile_size,
@@ -175,6 +178,7 @@ def model_fn_wan_video_action(
     context: torch.Tensor = None,
     action_emb: Optional[torch.Tensor] = None,
     action_mod_emb: Optional[torch.Tensor] = None,
+    action_injection_mode: str = "adaln",
     clip_feature: Optional[torch.Tensor] = None,
     y: Optional[torch.Tensor] = None,
     fuse_vae_embedding_in_latents: bool = False,
@@ -209,14 +213,22 @@ def model_fn_wan_video_action(
     elif not use_text_embedding:
         context = None
 
-    if context is None:
-        context = action_emb
-    else:
-        context = torch.cat([context, action_emb], dim=1)
-    text_token_count = context.shape[1]
-    num_spatial_tokens = t.shape[1] // action_mod_emb.shape[1]
-    action_mod_emb = action_mod_emb.unsqueeze(2).repeat(1, 1, num_spatial_tokens, 1).flatten(1, 2)
-    t = t + action_mod_emb
+    if action_injection_mode == "cross" and action_emb is not None:
+        context = action_emb if context is None else torch.cat([context, action_emb], dim=1)
+        text_token_count = context.shape[1]
+    elif action_injection_mode == "adaln":
+        if action_emb is None or action_mod_emb is None:
+            raise ValueError("action mode 'adaln' requires action_emb and action_mod_emb.")
+        context = action_emb if context is None else torch.cat([context, action_emb], dim=1)
+        text_token_count = context.shape[1]
+        if t.shape[1] % action_mod_emb.shape[1] != 0:
+            raise RuntimeError(
+                f"Temporal group mismatch: t.shape={tuple(t.shape)}, "
+                f"action_mod_emb.shape={tuple(action_mod_emb.shape)}."
+            )
+        num_spatial_tokens = t.shape[1] // action_mod_emb.shape[1]
+        action_mod_emb = action_mod_emb.unsqueeze(2).repeat(1, 1, num_spatial_tokens, 1).flatten(1, 2)
+        t = t + action_mod_emb
 
     if t.ndim == 3:
         t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
@@ -237,6 +249,11 @@ def model_fn_wan_video_action(
 
     x = dit.patchify(x)
     f, h, w = x.shape[2:]
+
+    if action_injection_mode == "noise" and action_emb is not None:
+        action_emb = rearrange(action_emb, "b f d -> b d f 1 1")
+        action_emb = repeat(action_emb, "b d f 1 1 -> b d f h w", h=h, w=w)
+        x = x + action_emb
 
     x = rearrange(x, 'b c f h w -> b (f h w) c').contiguous()
 
@@ -272,6 +289,8 @@ def model_fn_wan_video_action(
 
 
 def load_checkpoint_weights(pipe, ckpt_path: str):
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Model initialization checkpoint does not exist: {ckpt_path}")
     print(f"Loading training weights from checkpoint: {ckpt_path}")
     state_dict = load_state_dict(ckpt_path, torch_dtype=pipe.torch_dtype, device="cpu")
 
@@ -294,6 +313,11 @@ def load_checkpoint_weights(pipe, ckpt_path: str):
             key = key[len(dit_prefix):]
         dit_state[key] = value
 
+    if not dit_state:
+        raise RuntimeError(f"Checkpoint contains no DiT weights: {ckpt_path}")
+    if not action_state:
+        raise RuntimeError(f"Checkpoint contains no action encoder weights: {ckpt_path}")
+
     dit_result = dit.load_state_dict(dit_state, strict=False)
     print(
         f"  - Loaded dit keys: {len(dit_state)} "
@@ -307,6 +331,19 @@ def load_checkpoint_weights(pipe, ckpt_path: str):
     )
 
 
+def _as_batched_views(tensor: torch.Tensor, name: str) -> torch.Tensor:
+    """Normalize (V,C,T,H,W) and (B,V,C,T,H,W) inputs to batched views."""
+    if not torch.is_tensor(tensor):
+        raise TypeError(f"{name} must be a tensor, got {type(tensor).__name__}.")
+    if tensor.ndim == 5:
+        return tensor.unsqueeze(0)
+    if tensor.ndim == 6:
+        return tensor
+    raise ValueError(
+        f"{name} must have shape (V,C,T,H,W) or (B,V,C,T,H,W), got {tuple(tensor.shape)}."
+    )
+
+
 class WanVideoUnit_NoiseInitializer(PipelineUnit):
     def __init__(self):
         super().__init__(
@@ -316,19 +353,26 @@ class WanVideoUnit_NoiseInitializer(PipelineUnit):
 
     def process(self, pipe: WanVideoPipeline, input_video, precomputed_latents, height, width, num_frames, seed, rand_device):
         if precomputed_latents is not None:
+            precomputed_latents = _as_batched_views(precomputed_latents, "precomputed_latents")
+            batch_size, num_views, channels, latent_frames, latent_height, latent_width = precomputed_latents.shape
             shape = (
-                1,
-                int(precomputed_latents.shape[1]),
-                int(precomputed_latents.shape[2]),
-                int(precomputed_latents.shape[0]) * int(precomputed_latents.shape[3]),
-                int(precomputed_latents.shape[4]),
+                int(batch_size),
+                int(channels),
+                int(latent_frames),
+                int(num_views) * int(latent_height),
+                int(latent_width),
             )
         else:
-            num_views = int(input_video.shape[0]) if input_video is not None else 1
+            if input_video is None:
+                batch_size, num_views = 1, 1
+            else:
+                input_video = _as_batched_views(input_video, "input_video")
+                batch_size = int(input_video.shape[0])
+                num_views = int(input_video.shape[1])
             length = (int(num_frames) - 1) // 4 + 1
             latent_height = (int(height) * num_views) // pipe.vae.upsampling_factor
             latent_width = int(width) // pipe.vae.upsampling_factor
-            shape = (1, pipe.vae.model.z_dim, length, latent_height, latent_width)
+            shape = (batch_size, pipe.vae.model.z_dim, length, latent_height, latent_width)
 
         noise = pipe.generate_noise(shape, seed=seed, rand_device=rand_device)
         return {"noise": noise}
@@ -350,17 +394,28 @@ class WanVideoUnit_ActionEmbedder(PipelineUnit):
         action = torch.as_tensor(action, device=pipe.device, dtype=pipe.torch_dtype)
 
         target_groups = (int(num_frames) - 1) // 4 + 1
-        target_action_frames = 1 + 4 * (target_groups - 1)
-        current_action_frames = int(action.shape[1])
-        if current_action_frames > target_action_frames:
-            action = action[:, :target_action_frames]
-        elif current_action_frames < target_action_frames:
-            raise ValueError(
-                f"Action sequence too short for latent groups: action_frames={current_action_frames}, "
-                f"required={target_action_frames}, target_groups={target_groups}"
-            )
-        action_emb, action_mod_emb = pipe.action_encoder(action)
-        return {"action_emb": action_emb, "action_mod_emb": action_mod_emb}
+        if pipe.action_injection_mode == "adaln":
+            target_action_frames = 1 + 4 * (target_groups - 1)
+            current_action_frames = int(action.shape[1])
+            if current_action_frames > target_action_frames:
+                action = action[:, :target_action_frames]
+            elif current_action_frames < target_action_frames:
+                raise ValueError(
+                    f"Action sequence too short for latent groups: action_frames={current_action_frames}, "
+                    f"required={target_action_frames}, target_groups={target_groups}"
+                )
+            action_emb, action_mod_emb = pipe.action_encoder.encode_ti2v2(action)
+            return {"action_emb": action_emb, "action_mod_emb": action_mod_emb}
+
+        if pipe.action_injection_mode == "noise":
+            action = torch.cat([action[:, 0:1].repeat(1, 4, 1), action[:, 1:]], dim=1)
+            action = action.contiguous().view(action.shape[0], target_groups, 4, action.shape[-1]).mean(dim=2)
+
+        action_emb = pipe.action_encoder(action)
+        if pipe.action_injection_mode == "cross":
+            action_pos = torch.arange(action_emb.shape[1], device=action_emb.device, dtype=action_emb.dtype)
+            action_emb = action_emb + sinusoidal_embedding_1d(action_emb.shape[-1], action_pos).unsqueeze(0)
+        return {"action_emb": action_emb}
 
 
 class WanVideoUnit_InputVideoEmbedder(PipelineUnit):
@@ -389,10 +444,11 @@ class WanVideoUnit_InputVideoEmbedder(PipelineUnit):
         tile_stride,
     ):
         if precomputed_latents is not None:
-            input_latents_views = precomputed_latents.to(dtype=pipe.torch_dtype, device=pipe.device)
+            input_latents_views = _as_batched_views(precomputed_latents, "precomputed_latents")
+            input_latents_views = input_latents_views.to(dtype=pipe.torch_dtype, device=pipe.device)
             input_latents = rearrange(
                 input_latents_views,
-                "v c t h w -> 1 c t (v h) w",
+                "b v c t h w -> b c t (v h) w",
             )
             if pipe.scheduler.training:
                 return {"latents": noise, "input_latents": input_latents}
@@ -402,19 +458,27 @@ class WanVideoUnit_InputVideoEmbedder(PipelineUnit):
         if input_video is None:
             return {"latents": noise}
 
-        if int(input_video.shape[2]) <= 1 or (not pipe.scheduler.training and int(input_video.shape[2]) < int(num_frames)):
+        input_video = _as_batched_views(input_video, "input_video")
+        if int(input_video.shape[-3]) <= 1 or (not pipe.scheduler.training and int(input_video.shape[-3]) < int(num_frames)):
             return {"latents": noise}
 
         pipe.load_models_to_device(self.onload_model_names)
         input_video = input_video.to(dtype=pipe.torch_dtype, device=pipe.device)
+        batch_size, num_views = int(input_video.shape[0]), int(input_video.shape[1])
+        vae_input = rearrange(input_video, "b v c t h w -> (b v) c t h w")
         input_latents_views = pipe.vae.encode(
-            input_video,
+            vae_input,
             device=pipe.device,
             tiled=tiled,
             tile_size=tile_size,
             tile_stride=tile_stride,
         ).to(dtype=pipe.torch_dtype, device=pipe.device)
-        input_latents = rearrange(input_latents_views, "v c t h w -> 1 c t (v h) w")
+        input_latents = rearrange(
+            input_latents_views,
+            "(b v) c t h w -> b c t (v h) w",
+            b=batch_size,
+            v=num_views,
+        )
 
         if pipe.scheduler.training:
             return {"latents": noise, "input_latents": input_latents}
@@ -504,25 +568,33 @@ class WanVideoUnit_ImageEmbedderFused(PipelineUnit):
         if input_video is None:
             return {}
 
+        input_video = _as_batched_views(input_video, "input_video")
         num_history_frames = int(num_history_frames)
         if num_history_frames <= 0:
             raise ValueError("`input_video` must include at least one history frame.")
-        if input_video.shape[2] < num_history_frames:
+        if input_video.shape[-3] < num_history_frames:
             raise ValueError(
-                f"`num_history_frames` ({num_history_frames}) exceeds input video frames ({input_video.shape[2]})."
+                f"`num_history_frames` ({num_history_frames}) exceeds input video frames ({input_video.shape[-3]})."
             )
 
         pipe.load_models_to_device(self.onload_model_names)
-        history_frames = input_video[:, :, :num_history_frames].to(dtype=pipe.torch_dtype, device=pipe.device)
+        history_frames = input_video[:, :, :, :num_history_frames].to(dtype=pipe.torch_dtype, device=pipe.device)
+        batch_size, num_views = int(history_frames.shape[0]), int(history_frames.shape[1])
+        vae_history = rearrange(history_frames, "b v c t h w -> (b v) c t h w")
         z_views = pipe.vae.encode(
-            history_frames,
+            vae_history,
             device=pipe.device,
             tiled=tiled,
             tile_size=tile_size,
             tile_stride=tile_stride,
         )
         z_views = z_views.to(dtype=pipe.torch_dtype, device=pipe.device)
-        z = rearrange(z_views, "v c t h w -> 1 c t (v h) w")
+        z = rearrange(
+            z_views,
+            "(b v) c t h w -> b c t (v h) w",
+            b=batch_size,
+            v=num_views,
+        )
 
         history_t = z.shape[2]
         latents[:, :, :history_t] = z

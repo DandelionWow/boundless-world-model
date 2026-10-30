@@ -158,6 +158,7 @@ def add_output_config(parser: argparse.ArgumentParser):
     group.add_argument("--remove_prefix_in_ckpt", type=str, default="pipe.dit.", help='[OPTIONAL] Remove prefix in ckpt. (default: "pipe.dit.")')
     group.add_argument("--save_steps", type=int, default=None, help="[KEY] Optimizer-step interval for checkpoint saving.")
     group.add_argument("--resume_from", type=str, default=None, help="[OPTIONAL] Path to a full training state directory saved by accelerator (e.g., output_path/states/latest).")
+    group.add_argument("--allow_unsafe_resume", action="store_true", default=False, help="[DANGEROUS] Allow a deliberately audited legacy or configuration-mismatched resume.")
     group.add_argument("--no_save_at_train_end", dest="save_at_train_end", action="store_false", default=True, help="[OPTIONAL] Skip the final checkpoint, useful for smoke tests.")
     return parser
 
@@ -192,7 +193,7 @@ def add_tracking_config(parser: argparse.ArgumentParser):
 
 def add_infer_config(parser: argparse.ArgumentParser):
     group = parser.add_argument_group("infer")
-    group.add_argument("--ckpt_path", type=str, default=None, help="[OPTIONAL] Path to model checkpoint (.safetensors) used for inference.")
+    group.add_argument("--ckpt_path", type=str, default=None, help="[OPTIONAL] Path to model checkpoint (.safetensors) used for model-only initialization in training or inference.")
     group.add_argument("--cfg_scale", type=float, default=5.0, help="[OPTIONAL] CFG scale for generation.")
     group.add_argument("--num_inference_steps", type=int, default=50, help="[OPTIONAL] Number of inference steps.")
     group.add_argument("--negative_prompt", type=str, default="The video is not of a high quality, it has a low resolution. Watermark present in each frame. The background is solid. Strange body and strange trajectory. Distortion", help="[OPTIONAL] Negative prompt for generation.")

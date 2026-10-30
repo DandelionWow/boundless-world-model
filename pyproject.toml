@@ -11,11 +11,9 @@ license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 dependencies = [
     # DiffSynth-Studio provides all base dependencies (torch, einops, etc.)
-    "diffsynth>=2.0.0",
+    "diffsynth==2.0.11",
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-dir]
-"" = "src"
+where = ["."]
+include = ["wan_video_action*"]

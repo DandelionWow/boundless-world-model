@@ -5,6 +5,7 @@ set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TOKENIZERS_PARALLELISM="false"
 
+TRAIN_MODE="${TRAIN_MODE:-fresh}"
 if [ -f scripts/train_local.sh ]; then
   source scripts/train_local.sh
 fi
@@ -14,6 +15,7 @@ CONFIG_PATH="${CONFIG_PATH:-configs/train/train_wan22_ti2v_5b_action_adaln.yaml}
 ACCELERATE_CONFIG="${ACCELERATE_CONFIG:-configs/train/accelerate_multi_gpu.yaml}"
 MACHINE_RANK="${MACHINE_RANK:-}"
 DATASET_NUM_WORKERS="${DATASET_NUM_WORKERS:-8}"
+BATCH_SIZE="${BATCH_SIZE:-}"
 MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-20000}"
 SAVE_STEPS="${SAVE_STEPS:-2000}"
 SAVE_AT_TRAIN_END="${SAVE_AT_TRAIN_END:-1}"
@@ -22,8 +24,36 @@ DETERMINISTIC="${DETERMINISTIC:-0}"
 USE_WANDB="${USE_WANDB:-0}"
 USE_SWANLAB="${USE_SWANLAB:-0}"
 RUN_NAME="${RUN_NAME:-}"
+INIT_CKPT="${INIT_CKPT:-}"
 RESUME_FROM="${RESUME_FROM:-}"
 OUTPUT_PATH="${OUTPUT_PATH:-}"
+
+case "${TRAIN_MODE}" in
+  fresh)
+    if [ -z "${INIT_CKPT}" ]; then
+      echo "TRAIN_MODE=fresh requires INIT_CKPT." >&2
+      exit 2
+    fi
+    if [ -n "${RESUME_FROM}" ]; then
+      echo "TRAIN_MODE=fresh cannot be combined with RESUME_FROM." >&2
+      exit 2
+    fi
+    ;;
+  resume)
+    if [ -n "${INIT_CKPT}" ]; then
+      echo "TRAIN_MODE=resume cannot be combined with INIT_CKPT." >&2
+      exit 2
+    fi
+    if [ -z "${RESUME_FROM}" ]; then
+      echo "TRAIN_MODE=resume requires RESUME_FROM." >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "Unsupported TRAIN_MODE=${TRAIN_MODE}; expected fresh or resume." >&2
+    exit 2
+    ;;
+esac
 
 LAUNCH_CMD=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
@@ -48,6 +78,10 @@ TRAIN_CMD=(
   --use_gradient_checkpointing
 )
 
+if [ -n "${BATCH_SIZE}" ]; then
+  TRAIN_CMD+=(--batch_size "${BATCH_SIZE}")
+fi
+
 if [ "${DETERMINISTIC}" = "1" ]; then
   TRAIN_CMD+=(--deterministic)
 fi
@@ -70,6 +104,10 @@ fi
 
 if [ -n "${OUTPUT_PATH}" ]; then
   TRAIN_CMD+=(--output_path "${OUTPUT_PATH}")
+fi
+
+if [ -n "${INIT_CKPT}" ]; then
+  TRAIN_CMD+=(--ckpt_path "${INIT_CKPT}")
 fi
 
 if [ -n "${RESUME_FROM}" ]; then

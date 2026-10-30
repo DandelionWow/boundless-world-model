@@ -10,6 +10,12 @@ PYTHON_BIN="/path/to/python"
 CONFIG_PATH="configs/train/train_wan22_ti2v_5b_action_adaln.yaml"
 ACCELERATE_CONFIG="configs/train/accelerate_multi_gpu.yaml"
 MODEL_DIR="/path/to/Wan2.2-TI2V-5B"
+TRAIN_MODE="${TRAIN_MODE:-fresh}"
+if [ "${TRAIN_MODE}" = "fresh" ]; then
+  INIT_CKPT="${INIT_CKPT:-/path/to/step-12000.safetensors}"
+else
+  INIT_CKPT="${INIT_CKPT-}"
+fi
 DATASET_DIR="/path/to/robotwin_consistency/outputs/converted_dataset"
 DATASET_METADATA_PATH="${DATASET_DIR}/metadata.jsonl"
 ACTION_STAT_PATH="${DATASET_DIR}/stat.json"
